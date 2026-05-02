@@ -58,6 +58,30 @@ services:
       timeout: 5s
       retries: 5
 
+  # ─── MLflow Tracking Server ────────────────────────────────────
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:latest
+    container_name: cardiorisk_mlflow
+    ports:
+      - "5050:5000"
+    environment:
+      MLFLOW_BACKEND_STORE_URI: "postgresql://cardiorisk_user:cardiorisk_pass@postgres:5432/cardiorisk"
+      MLFLOW_DEFAULT_ARTIFACT_ROOT: "s3://cardiorisk/mlflow-artifacts"
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      MLFLOW_S3_ENDPOINT_URL: "http://minio:9000"
+    command: mlflow server --host 0.0.0.0 --port 5000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
   # ─── MinIO bucket initialiser (runs once) ────────────────────
   minio_init:
     image: minio/mc:latest
@@ -72,6 +96,7 @@ services:
       mc mb --ignore-existing local/cardiorisk/bronze;
       mc mb --ignore-existing local/cardiorisk/silver;
       mc mb --ignore-existing local/cardiorisk/gold;
+      mc mb --ignore-existing local/cardiorisk/mlflow-artifacts;
       echo 'MinIO buckets ready.';
       "
     restart: on-failure

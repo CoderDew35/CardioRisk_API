@@ -136,3 +136,24 @@ class CohortAggregates(BaseModel):
     cvd_positive_pct: float
     bp_category_distribution: dict[str, int]
     risk_band_note: str = "Risk bands require model inference — use /patients/{id}/risk"
+
+
+# ── MLOps ────────────────────────────────────────────────────────────────────
+
+class ModelRegistryEntry(BaseModel):
+    version: str
+    stage: str
+    auc_roc: float
+    auprc: float | None = None
+    brier_score: float | None = None
+    created_at: str
+
+
+class MLOpsStatusResponse(BaseModel):
+    current_model_version: str
+    model_name: str
+    last_drift_check: str | None = None
+    drift_detected: bool = False
+    drift_scores: dict[str, float] | None = None
+    is_training: bool = False
+

@@ -26,6 +26,8 @@ load_dotenv(Path(__file__).parent.parent.parent / ".env")
 
 import joblib
 import lightgbm as lgb
+import mlflow
+import mlflow.lightgbm
 import numpy as np
 import optuna
 import pandas as pd
@@ -257,8 +259,21 @@ def save_artifacts(model: lgb.LGBMClassifier, X_train: pd.DataFrame) -> None:
 
 #Main ───────────────
 
-def main() -> None:
-    logger.info("=== CardioRisk LightGBM Training Pipeline ===")
+def run_training_pipeline(
+    n_trials: int = N_TRIALS,
+    register_as_production: bool = True,
+) -> dict:
+    """
+    Full training pipeline — callable by both CLI and ContinuousTrainingService.
+
+    Args:
+        n_trials: Number of Optuna HPO trials (default 50 for CLI, 20 for CT).
+        register_as_production: If True, tags the model as 'Production' in MLflow.
+
+    Returns:
+        dict with 'model', 'metrics', 'model_version'.
+    """
+    logger.info("=== CardioRisk LightGBM Training Pipeline (trials=%d) ===", n_trials)
 
     df = load_data()
     df = engineer_features(df)
@@ -267,7 +282,14 @@ def main() -> None:
 
     train_baselines(X_train, y_train, X_val, y_val)
 
+    # Override N_TRIALS for this run
+    global N_TRIALS
+    original_trials = N_TRIALS
+    N_TRIALS = n_trials
+
     model = train_lgbm_with_hpo(X_train, y_train, X_val, y_val)
+
+    N_TRIALS = original_trials  # Restore
 
     metrics = evaluate(model, X_test, y_test)
 
@@ -276,7 +298,55 @@ def main() -> None:
     logger.info("Quality bar passed: AUC-ROC=%.4f >= 0.70", metrics["auc_roc"])
 
     save_artifacts(model, X_train)
+
+    # ── MLflow Logging ────────────────────────────────────────────────────
+    mlflow_uri = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5050")
+    experiment_name = os.getenv("MLFLOW_EXPERIMENT_NAME", "cardiorisk-lgbm")
+    mlflow.set_tracking_uri(mlflow_uri)
+    mlflow.set_experiment(experiment_name)
+
+    model_version = None
+    with mlflow.start_run(run_name=f"lgbm-optuna-{n_trials}t") as run:
+        # Log hyperparameters
+        mlflow.log_params(model.get_params())
+        mlflow.log_param("n_trials", n_trials)
+
+        # Log metrics
+        mlflow.log_metrics(metrics)
+
+        # Log model to registry
+        result = mlflow.lightgbm.log_model(
+            model,
+            artifact_path="model",
+            registered_model_name="cardiorisk-lgbm",
+        )
+        model_version = result.registered_model_version
+        logger.info(
+            "MLflow: logged run_id=%s, model version=%s",
+            run.info.run_id, model_version,
+        )
+
+        # Promote to Production if requested
+        if register_as_production and model_version:
+            client = mlflow.MlflowClient()
+            client.transition_model_version_stage(
+                name="cardiorisk-lgbm",
+                version=model_version,
+                stage="Production",
+                archive_existing_versions=True,
+            )
+            logger.info("MLflow: model v%s promoted to Production", model_version)
+
     logger.info("=== Training complete ===")
+    return {
+        "model": model,
+        "metrics": metrics,
+        "model_version": model_version or "unknown",
+    }
+
+
+def main() -> None:
+    run_training_pipeline(n_trials=N_TRIALS, register_as_production=True)
 
 
 if __name__ == "__main__":

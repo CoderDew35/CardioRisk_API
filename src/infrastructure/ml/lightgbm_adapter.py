@@ -3,6 +3,7 @@ LightGBMAdapter — implements IRiskModel port.
 
 Loads a pre-trained LightGBM model from disk (joblib serialized).
 Returns RiskScore value objects. Stateless after loading.
+Supports hot-swap via reload() for continuous training pipeline.
 """
 from __future__ import annotations
 
@@ -19,6 +20,8 @@ from src.domain.value_objects.risk_trajectory import RiskScore
 logger = logging.getLogger(__name__)
 
 MODEL_PATH = os.getenv("MODEL_PATH", "ml/models/lgbm_cardio_v1.joblib")
+MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5050")
+MODEL_REGISTRY_NAME = "cardiorisk-lgbm"
 
 # Feature order must match training pipeline exactly
 FEATURE_NAMES = [
@@ -37,6 +40,7 @@ class LightGBMAdapter:
     """
     Wraps a scikit-learn/LightGBM pipeline.
     Implements IRiskModel — call predict(features_dict) → RiskScore.
+    Supports hot-swap via reload() for continuous training.
     """
 
     def __init__(self, model_path: str = MODEL_PATH) -> None:
@@ -80,3 +84,50 @@ class LightGBMAdapter:
     @property
     def feature_names(self) -> list[str]:
         return FEATURE_NAMES
+
+    def reload(self) -> bool:
+        """
+        Check MLflow registry for the current Production model.
+        If version differs from loaded version, download and swap atomically.
+
+        Returns True if model was swapped, False if already current.
+        """
+        try:
+            import mlflow
+            from mlflow.tracking import MlflowClient
+
+            client = MlflowClient(tracking_uri=MLFLOW_TRACKING_URI)
+            versions = client.get_latest_versions(
+                MODEL_REGISTRY_NAME, stages=["Production"]
+            )
+
+            if not versions:
+                logger.info("No Production model in registry — skipping reload")
+                return False
+
+            prod = versions[0]
+            registry_version = f"v{prod.version}"
+
+            if registry_version == self._version:
+                logger.debug("Model already at version %s — no reload needed", self._version)
+                return False
+
+            # Download model from registry
+            logger.info(
+                "Hot-swap: loading model v%s from MLflow (was %s)",
+                prod.version, self._version,
+            )
+            model_uri = f"models:/{MODEL_REGISTRY_NAME}/{prod.version}"
+            new_model = mlflow.lightgbm.load_model(model_uri)
+
+            # Atomic swap (CPython GIL guarantees single-pointer assignment is atomic)
+            self._model = new_model
+            self._version = registry_version
+
+            logger.info("Hot-swap complete: now serving model %s", self._version)
+            return True
+
+        except Exception as exc:
+            logger.error("Model reload failed: %s — continuing with current model", exc)
+            return False
+

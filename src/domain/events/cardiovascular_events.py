@@ -80,3 +80,47 @@ class AuditLogWritten:
     @property
     def routing_key(self) -> str:
         return "audit.log.written"
+
+
+# ── ModelDriftDetected ────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class ModelDriftDetected:
+    """
+    Published by DriftDetectionService when statistical divergence is detected.
+    Consumed by: ContinuousTrainingService.
+    Routing key: model.drift.detected
+    """
+    drifted_features: dict[str, float]   # {feature_name: ks_statistic}
+    psi_scores: dict[str, float]         # {feature_name: psi_value}
+    window_size: int
+    current_model_version: str
+    event_id: UUID = field(default_factory=uuid4)
+    occurred_at: datetime = field(default_factory=_utcnow)
+
+    @property
+    def routing_key(self) -> str:
+        return "model.drift.detected"
+
+
+# ── ModelRetrained ────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class ModelRetrained:
+    """
+    Published by ContinuousTrainingService after retrain + evaluation.
+    Consumed by: API (hot-swap trigger), Dashboard (notification).
+    Routing key: model.retrained
+    """
+    new_model_version: str
+    old_model_version: str
+    auc_roc_new: float
+    auc_roc_old: float
+    promoted: bool                       # True if new model replaced old
+    event_id: UUID = field(default_factory=uuid4)
+    occurred_at: datetime = field(default_factory=_utcnow)
+
+    @property
+    def routing_key(self) -> str:
+        return "model.retrained"
+

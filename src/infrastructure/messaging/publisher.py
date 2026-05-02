@@ -18,6 +18,8 @@ from aio_pika import DeliveryMode, ExchangeType, Message
 
 from src.domain.events.cardiovascular_events import (
     AuditLogWritten,
+    ModelDriftDetected,
+    ModelRetrained,
     PatientTelemetryReceived,
     RiskScoreGenerated,
 )
@@ -27,7 +29,10 @@ logger = logging.getLogger(__name__)
 EXCHANGE_NAME = "cardiorisk.events"
 RABBITMQ_URL = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/")
 
-DomainEvent = PatientTelemetryReceived | RiskScoreGenerated | AuditLogWritten
+DomainEvent = (
+    PatientTelemetryReceived | RiskScoreGenerated | AuditLogWritten
+    | ModelDriftDetected | ModelRetrained
+)
 
 
 def _serialise_event(event: DomainEvent) -> dict[str, Any]:
@@ -36,8 +41,11 @@ def _serialise_event(event: DomainEvent) -> dict[str, Any]:
         "event_id": str(event.event_id),
         "event_type": type(event).__name__,
         "occurred_at": event.occurred_at.isoformat(),
-        "patient_id": str(event.patient_id),
     }
+
+    # Patient-scoped events carry patient_id
+    if hasattr(event, "patient_id"):
+        base["patient_id"] = str(event.patient_id)
 
     if isinstance(event, PatientTelemetryReceived):
         base.update({
@@ -59,6 +67,21 @@ def _serialise_event(event: DomainEvent) -> dict[str, Any]:
         base.update({
             "original_event_id": str(event.original_event_id),
             "bronze_path": event.bronze_path,
+        })
+    elif isinstance(event, ModelDriftDetected):
+        base.update({
+            "drifted_features": event.drifted_features,
+            "psi_scores": event.psi_scores,
+            "window_size": event.window_size,
+            "current_model_version": event.current_model_version,
+        })
+    elif isinstance(event, ModelRetrained):
+        base.update({
+            "new_model_version": event.new_model_version,
+            "old_model_version": event.old_model_version,
+            "auc_roc_new": event.auc_roc_new,
+            "auc_roc_old": event.auc_roc_old,
+            "promoted": event.promoted,
         })
 
     return base
@@ -89,12 +112,18 @@ class RabbitMQPublisher:
         payload = _serialise_event(event)
         body = json.dumps(payload, default=str).encode()
 
+        # Correlation ID: patient_id for patient-scoped events, event_id otherwise
+        correlation_id = (
+            str(event.patient_id) if hasattr(event, "patient_id")
+            else str(event.event_id)
+        )
+
         message = Message(
             body=body,
             content_type="application/json",
             delivery_mode=DeliveryMode.PERSISTENT,  # survives broker restart
             message_id=str(event.event_id),
-            correlation_id=str(event.patient_id),
+            correlation_id=correlation_id,
         )
 
         await self._exchange.publish(

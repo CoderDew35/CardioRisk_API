@@ -1,5 +1,5 @@
 .PHONY: help setup dev lint test test-unit test-integration compose-up compose-down \
-        train shap seed-db clean
+        train shap seed-db clean drift ct simulate-stream
 
 # ─── Help ────────────────
 help:
@@ -13,12 +13,15 @@ help:
 	@echo "  make dev            Start FastAPI dev server (hot reload)"
 	@echo "  make audit          Start AuditService worker"
 	@echo "  make inference      Start InferenceService worker"
+	@echo "  make drift          Start DriftDetectionService worker"
+	@echo "  make ct             Start ContinuousTrainingService worker"
 	@echo "  make lint           Run ruff + mypy"
 	@echo "  make test           Run full test suite with coverage"
 	@echo "  make test-unit      Run unit tests only"
 	@echo "  make test-int       Run integration tests only"
 	@echo "  make train          Run LightGBM training pipeline"
 	@echo "  make shap           Run SHAP analysis + save explainer"
+	@echo "  make simulate-stream  Run thesis demo (streaming + drift + CT)"
 	@echo "  make clean          Remove __pycache__ + .pytest_cache"
 	@echo ""
 
@@ -37,6 +40,7 @@ compose-up:
 	@echo "  RabbitMQ UI  → http://localhost:15672  (guest/guest)"
 	@echo "  MinIO Console → http://localhost:9001   (minioadmin/minioadmin)"
 	@echo "  PostgreSQL   → localhost:5432           (cardiorisk_user/cardiorisk_pass)"
+	@echo "  MLflow UI    → http://localhost:5050"
 
 compose-down:
 	docker compose down
@@ -54,6 +58,12 @@ audit:
 
 inference:
 	uv run python services/inference_service/main.py
+
+drift:
+	uv run python services/drift_service/main.py
+
+ct:
+	uv run python services/ct_service/main.py
 
 # ─── Linting ─────────────
 lint:
@@ -91,6 +101,9 @@ evaluate:
 
 eda:
 	uv run python ml/pipelines/01_eda.py
+
+simulate-stream:
+	uv run python ml/pipelines/08_simulate_stream.py
 
 # ─── Migrations ──────────
 migrate:

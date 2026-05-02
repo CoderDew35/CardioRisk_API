@@ -19,7 +19,7 @@ from aio_pika import ExchangeType
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from src.interfaces.api.routers import patients, cohort, health
+from src.interfaces.api.routers import patients, cohort, health, mlops
 from src.infrastructure.messaging.publisher import RabbitMQPublisher
 from src.infrastructure.messaging.websocket_manager import WebSocketManager
 
@@ -34,30 +34,68 @@ _ws_manager = WebSocketManager()
 
 
 async def _run_dashboard_consumer(manager: WebSocketManager) -> None:
-    """Background task: consume RiskScoreGenerated events and relay to WebSockets."""
+    """Background task: consume RiskScoreGenerated + ModelRetrained events and relay to WebSockets."""
     try:
         connection = await aio_pika.connect_robust(RABBITMQ_URL)
         channel = await connection.channel()
         exchange = await channel.declare_exchange(
             EXCHANGE_NAME, ExchangeType.TOPIC, durable=True
         )
-        queue = await channel.declare_queue(
+
+        # Queue for risk score events (existing)
+        scores_queue = await channel.declare_queue(
             "dashboard.scores.q", durable=True
         )
-        await queue.bind(exchange, routing_key="risk.score.generated")
+        await scores_queue.bind(exchange, routing_key="risk.score.generated")
+
+        # Queue for model retrained events (new — hot-swap trigger)
+        mlops_queue = await channel.declare_queue(
+            "dashboard.mlops.q", durable=True
+        )
+        await mlops_queue.bind(exchange, routing_key="model.retrained")
 
         logger.info("Dashboard consumer started — relaying to WebSockets")
 
-        async with queue.iterator() as messages:
-            async for message in messages:
-                try:
-                    body = json.loads(message.body)
-                    patient_id = body.get("patient_id", "")
-                    await manager.broadcast(patient_id, body)
-                    await message.ack()
-                except Exception as exc:
-                    logger.warning("Dashboard relay error: %s", exc)
-                    await message.reject(requeue=False)
+        async def _handle_score(message: aio_pika.abc.AbstractIncomingMessage) -> None:
+            try:
+                body = json.loads(message.body)
+                patient_id = body.get("patient_id", "")
+                await manager.broadcast(patient_id, body)
+                await message.ack()
+            except Exception as exc:
+                logger.warning("Dashboard relay error: %s", exc)
+                await message.reject(requeue=False)
+
+        async def _handle_retrained(message: aio_pika.abc.AbstractIncomingMessage) -> None:
+            try:
+                body = json.loads(message.body)
+                promoted = body.get("promoted", False)
+                if promoted:
+                    logger.info(
+                        "ModelRetrained received — promoted=True, triggering hot-swap"
+                    )
+                    from src.interfaces.api.dependencies import model
+                    swapped = model.reload()
+                    if swapped:
+                        logger.info("Model hot-swap successful: now serving %s", model.model_version)
+                    else:
+                        logger.info("Model reload returned False — no swap needed")
+                else:
+                    logger.info("ModelRetrained received — not promoted, no hot-swap")
+
+                # Broadcast retrain event to connected dashboards
+                await manager.broadcast("__mlops__", body)
+                await message.ack()
+            except Exception as exc:
+                logger.warning("MLOps event relay error: %s", exc)
+                await message.reject(requeue=False)
+
+        await scores_queue.consume(_handle_score)
+        await mlops_queue.consume(_handle_retrained)
+
+        # Keep the consumer running
+        await asyncio.Future()  # Block forever
+
     except Exception as exc:
         logger.error("Dashboard consumer failed to start: %s", exc)
 
@@ -96,6 +134,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        "http://localhost:8080",
         "http://localhost:5173",   # Vite dev server
         "http://localhost:3000",   # CRA / Next.js dev server
     ],
@@ -108,3 +147,4 @@ app.add_middleware(
 app.include_router(health.router, tags=["Health"])
 app.include_router(patients.router, prefix="/v1/patients", tags=["Patients"])
 app.include_router(cohort.router, prefix="/v1/cohort", tags=["Cohort"])
+app.include_router(mlops.router, prefix="/v1/mlops", tags=["MLOps"])
