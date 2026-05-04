@@ -404,4 +404,4 @@ make help         # Show all available commands
 
 ## License
 
-This project is part of a PhD thesis. See LICENSE for details.
+This project is part of a MSc thesis. See LICENSE for details.
